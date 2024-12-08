@@ -21,47 +21,11 @@ import type { ProviderInfo } from '~/utils/types';
 import { ExportChatButton } from '~/components/chat/chatExportAndImport/ExportChatButton';
 import { ImportButtons } from '~/components/chat/chatExportAndImport/ImportButtons';
 import { ExamplePrompts } from '~/components/chat/ExamplePrompts';
+import GitCloneButton from './GitCloneButton';
 
 import FilePreview from './FilePreview';
-
-// @ts-ignore TODO: Introduce proper types
-// eslint-disable-next-line @typescript-eslint/no-unused-vars
-const ModelSelector = ({ model, setModel, provider, setProvider, modelList, providerList, apiKeys }) => {
-  return (
-    <div className="mb-2 flex gap-2 flex-col sm:flex-row">
-      <select
-        value={provider?.name}
-        onChange={(e) => {
-          setProvider(providerList.find((p: ProviderInfo) => p.name === e.target.value));
-
-          const firstModel = [...modelList].find((m) => m.provider == e.target.value);
-          setModel(firstModel ? firstModel.name : '');
-        }}
-        className="flex-1 p-2 rounded-lg border border-bolt-elements-borderColor bg-bolt-elements-prompt-background text-bolt-elements-textPrimary focus:outline-none focus:ring-2 focus:ring-bolt-elements-focus transition-all"
-      >
-        {providerList.map((provider: ProviderInfo) => (
-          <option key={provider.name} value={provider.name}>
-            {provider.name}
-          </option>
-        ))}
-      </select>
-      <select
-        key={provider?.name}
-        value={model}
-        onChange={(e) => setModel(e.target.value)}
-        className="flex-1 p-2 rounded-lg border border-bolt-elements-borderColor bg-bolt-elements-prompt-background text-bolt-elements-textPrimary focus:outline-none focus:ring-2 focus:ring-bolt-elements-focus transition-all lg:max-w-[70%]"
-      >
-        {[...modelList]
-          .filter((e) => e.provider == provider?.name && e.name)
-          .map((modelOption) => (
-            <option key={modelOption.name} value={modelOption.name}>
-              {modelOption.label}
-            </option>
-          ))}
-      </select>
-    </div>
-  );
-};
+import { ModelSelector } from '~/components/chat/ModelSelector';
+import { SpeechRecognitionButton } from '~/components/chat/SpeechRecognition';
 
 const TEXTAREA_MIN_HEIGHT = 76;
 
@@ -92,6 +56,7 @@ interface BaseChatProps {
   imageDataList?: string[];
   setImageDataList?: (dataList: string[]) => void;
 }
+
 export const BaseChat = React.forwardRef<HTMLDivElement, BaseChatProps>(
   (
     {
@@ -123,10 +88,66 @@ export const BaseChat = React.forwardRef<HTMLDivElement, BaseChatProps>(
     ref,
   ) => {
     const TEXTAREA_MAX_HEIGHT = chatStarted ? 400 : 200;
-    const [apiKeys, setApiKeys] = useState<Record<string, string>>({});
+    const [apiKeys, setApiKeys] = useState<Record<string, string>>(() => {
+      const savedKeys = Cookies.get('apiKeys');
+
+      if (savedKeys) {
+        try {
+          return JSON.parse(savedKeys);
+        } catch (error) {
+          console.error('Failed to parse API keys from cookies:', error);
+          return {};
+        }
+      }
+
+      return {};
+    });
     const [modelList, setModelList] = useState(MODEL_LIST);
     const [isModelSettingsCollapsed, setIsModelSettingsCollapsed] = useState(false);
+    const [isListening, setIsListening] = useState(false);
+    const [recognition, setRecognition] = useState<SpeechRecognition | null>(null);
+    const [transcript, setTranscript] = useState('');
 
+    // Load enabled providers from cookies
+    const [enabledProviders, setEnabledProviders] = useState(() => {
+      const savedProviders = Cookies.get('providers');
+
+      if (savedProviders) {
+        try {
+          const parsedProviders = JSON.parse(savedProviders);
+          return PROVIDER_LIST.filter((p) => parsedProviders[p.name]);
+        } catch (error) {
+          console.error('Failed to parse providers from cookies:', error);
+          return PROVIDER_LIST;
+        }
+      }
+
+      return PROVIDER_LIST;
+    });
+
+    // Update enabled providers when cookies change
+    useEffect(() => {
+      const updateProvidersFromCookies = () => {
+        const savedProviders = Cookies.get('providers');
+
+        if (savedProviders) {
+          try {
+            const parsedProviders = JSON.parse(savedProviders);
+            setEnabledProviders(PROVIDER_LIST.filter((p) => parsedProviders[p.name]));
+          } catch (error) {
+            console.error('Failed to parse providers from cookies:', error);
+          }
+        }
+      };
+
+      updateProvidersFromCookies();
+
+      const interval = setInterval(updateProvidersFromCookies, 1000);
+
+      return () => clearInterval(interval);
+    }, [PROVIDER_LIST]);
+
+    console.log(transcript);
     useEffect(() => {
       // Load API keys from cookies on component mount
       try {
@@ -149,22 +170,69 @@ export const BaseChat = React.forwardRef<HTMLDivElement, BaseChatProps>(
       initializeModelList().then((modelList) => {
         setModelList(modelList);
       });
+
+      if (typeof window !== 'undefined' && ('SpeechRecognition' in window || 'webkitSpeechRecognition' in window)) {
+        const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+        const recognition = new SpeechRecognition();
+        recognition.continuous = true;
+        recognition.interimResults = true;
+
+        recognition.onresult = (event) => {
+          const transcript = Array.from(event.results)
+            .map((result) => result[0])
+            .map((result) => result.transcript)
+            .join('');
+
+          setTranscript(transcript);
+
+          if (handleInputChange) {
+            const syntheticEvent = {
+              target: { value: transcript },
+            } as React.ChangeEvent<HTMLTextAreaElement>;
+            handleInputChange(syntheticEvent);
+          }
+        };
+
+        recognition.onerror = (event) => {
+          console.error('Speech recognition error:', event.error);
+          setIsListening(false);
+        };
+
+        setRecognition(recognition);
+      }
     }, []);
 
-    const updateApiKey = (provider: string, key: string) => {
-      try {
-        const updatedApiKeys = { ...apiKeys, [provider]: key };
-        setApiKeys(updatedApiKeys);
+    const startListening = () => {
+      if (recognition) {
+        recognition.start();
+        setIsListening(true);
+      }
+    };
 
-        // Save updated API keys to cookies with 30 day expiry and secure settings
-        Cookies.set('apiKeys', JSON.stringify(updatedApiKeys), {
-          expires: 30, // 30 days
-          secure: true, // Only send over HTTPS
-          sameSite: 'strict', // Protect against CSRF
-          path: '/', // Accessible across the site
-        });
-      } catch (error) {
-        console.error('Error saving API keys to cookies:', error);
+    const stopListening = () => {
+      if (recognition) {
+        recognition.stop();
+        setIsListening(false);
+      }
+    };
+
+    const handleSendMessage = (event: React.UIEvent, messageInput?: string) => {
+      if (sendMessage) {
+        sendMessage(event, messageInput);
+
+        if (recognition) {
+          recognition.abort(); // Stop current recognition
+          setTranscript(''); // Clear transcript
+          setIsListening(false);
+
+          // Clear the input by triggering handleInputChange with empty value
+          if (handleInputChange) {
+            const syntheticEvent = {
+              target: { value: '' },
+            } as React.ChangeEvent<HTMLTextAreaElement>;
+            handleInputChange(syntheticEvent);
+          }
+        }
       }
     };
 
@@ -301,22 +369,6 @@ export const BaseChat = React.forwardRef<HTMLDivElement, BaseChatProps>(
                   <rect className={classNames(styles.PromptShine)} x="48" y="24" width="70" height="1"></rect>
                 </svg>
                 <div>
-                  <div className="flex justify-between items-center mb-2">
-                    <button
-                      onClick={() => setIsModelSettingsCollapsed(!isModelSettingsCollapsed)}
-                      className={classNames('flex items-center gap-2 p-2 rounded-lg transition-all', {
-                        'bg-bolt-elements-item-backgroundAccent text-bolt-elements-item-contentAccent':
-                          isModelSettingsCollapsed,
-                        'bg-bolt-elements-item-backgroundDefault text-bolt-elements-item-contentDefault':
-                          !isModelSettingsCollapsed,
-                      })}
-                    >
-                      <div className={`i-ph:caret-${isModelSettingsCollapsed ? 'right' : 'down'} text-lg`} />
-                      <span>Model Settings</span>
-                    </button>
-                  </div>
-
-
                   <div className={isModelSettingsCollapsed ? 'hidden' : ''}>
                     <ModelSelector
                       key={provider?.name + ':' + modelList.length}
@@ -328,11 +380,15 @@ export const BaseChat = React.forwardRef<HTMLDivElement, BaseChatProps>(
                       providerList={PROVIDER_LIST}
                       apiKeys={apiKeys}
                     />
-                    {provider && (
+                    {enabledProviders.length > 0 && provider && (
                       <APIKeyManager
                         provider={provider}
                         apiKey={apiKeys[provider.name] || ''}
-                        setApiKey={(key) => updateApiKey(provider.name, key)}
+                        setApiKey={(key) => {
+                          const newApiKeys = { ...apiKeys, [provider.name]: key };
+                          setApiKeys(newApiKeys);
+                          Cookies.set('apiKeys', JSON.stringify(newApiKeys));
+                        }}
                       />
                     )}
                   </div>
@@ -395,7 +451,12 @@ export const BaseChat = React.forwardRef<HTMLDivElement, BaseChatProps>(
 
                         event.preventDefault();
 
-                        sendMessage?.(event);
+                        if (isStreaming) {
+                          handleStop?.();
+                          return;
+                        }
+
+                        handleSendMessage?.(event);
                       }
                     }}
                     value={input}
@@ -415,6 +476,7 @@ export const BaseChat = React.forwardRef<HTMLDivElement, BaseChatProps>(
                       <SendButton
                         show={input.length > 0 || isStreaming || uploadedFiles.length > 0}
                         isStreaming={isStreaming}
+                        disabled={enabledProviders.length === 0}
                         onClick={(event) => {
                           if (isStreaming) {
                             handleStop?.();
@@ -422,7 +484,7 @@ export const BaseChat = React.forwardRef<HTMLDivElement, BaseChatProps>(
                           }
 
                           if (input.length > 0 || uploadedFiles.length > 0) {
-                            sendMessage?.(event);
+                            handleSendMessage?.(event);
                           }
                         }}
                       />
@@ -457,7 +519,28 @@ export const BaseChat = React.forwardRef<HTMLDivElement, BaseChatProps>(
                           </>
                         )}
                       </IconButton>
+
+                      <SpeechRecognitionButton
+                        isListening={isListening}
+                        onStart={startListening}
+                        onStop={stopListening}
+                        disabled={isStreaming}
+                      />
                       {chatStarted && <ClientOnly>{() => <ExportChatButton exportChat={exportChat} />}</ClientOnly>}
+                      <IconButton
+                        title="Model Settings"
+                        className={classNames('transition-all flex items-center gap-1', {
+                          'bg-bolt-elements-item-backgroundAccent text-bolt-elements-item-contentAccent':
+                            isModelSettingsCollapsed,
+                          'bg-bolt-elements-item-backgroundDefault text-bolt-elements-item-contentDefault':
+                            !isModelSettingsCollapsed,
+                        })}
+                        onClick={() => setIsModelSettingsCollapsed(!isModelSettingsCollapsed)}
+                        disabled={enabledProviders.length === 0}
+                      >
+                        <div className={`i-ph:caret-${isModelSettingsCollapsed ? 'right' : 'down'} text-lg`} />
+                        {isModelSettingsCollapsed ? <span className="text-xs">{model}</span> : <span />}
+                      </IconButton>
                     </div>
                     {input.length > 3 ? (
                       <div className="text-xs text-bolt-elements-textTertiary">
@@ -470,8 +553,21 @@ export const BaseChat = React.forwardRef<HTMLDivElement, BaseChatProps>(
                 </div>
               </div>
             </div>
-            {!chatStarted && ImportButtons(importChat)}
-            {!chatStarted && ExamplePrompts(sendMessage)}
+            {!chatStarted && (
+              <div className="flex justify-center gap-2">
+                {ImportButtons(importChat)}
+                <GitCloneButton importChat={importChat} />
+              </div>
+            )}
+            {!chatStarted &&
+              ExamplePrompts((event, messageInput) => {
+                if (isStreaming) {
+                  handleStop?.();
+                  return;
+                }
+
+                handleSendMessage?.(event, messageInput);
+              })}
           </div>
           <ClientOnly>{() => <Workbench chatStarted={chatStarted} isStreaming={isStreaming} />}</ClientOnly>
         </div>
